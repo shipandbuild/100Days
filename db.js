@@ -30,8 +30,13 @@ export function openDB() {
   return dbPromise;
 }
 
+// The app registers a listener so other open windows of the app can be told that data changed.
+let writeListener = () => {};
+export const onWrite = (fn) => { writeListener = fn; };
+
+// Only write transactions use done(), so this fires exactly when something was committed.
 const done = (tx) => new Promise((resolve, reject) => {
-  tx.oncomplete = () => resolve();
+  tx.oncomplete = () => { try { writeListener(); } catch { /* never let a listener break a save */ } resolve(); };
   tx.onerror = () => reject(tx.error);
   tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
 });
@@ -53,6 +58,23 @@ export async function put(store, value) {
   const tx = db.transaction(store, 'readwrite');
   tx.objectStore(store).put(value);
   return done(tx);
+}
+/** Read-modify-write in ONE transaction, so two open windows can never both act on the same stale copy.
+ *  `fn` receives a copy of the record and may change it; whatever `fn` returns is passed back. Does nothing if the record is gone. */
+export async function update(store, key, fn) {
+  const db = await openDB();
+  const tx = db.transaction(store, 'readwrite');
+  const os = tx.objectStore(store);
+  let out;
+  const req = os.get(key);
+  req.onsuccess = () => {
+    if (!req.result) return;
+    const copy = structuredClone(req.result);
+    out = fn(copy);
+    os.put(copy);
+  };
+  await done(tx);
+  return out;
 }
 export async function putMany(store, values) {
   const db = await openDB();

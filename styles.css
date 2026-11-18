@@ -144,4 +144,33 @@ dialog p{margin:6px 0 0;color:var(--muted);font-size:14px}
 .welcome{max-width:460px;margin:6vh auto 0}
 .welcome .mark{width:64px;height:64px;border-radius:20px;font-size:22px;margin-bottom:14px}
 .welcome h1{font-size:26px;margin:0 0 6px}
+/* long names or unbroken strings must wrap instead of pushing the page sideways */
+h1,h2,h3,.daytitle,.date,.quote,.note,.banner p,.hero p,dialog p,.err,.past-row span,.stat span{overflow-wrap:anywhere}
+.past-row span:first-child{min-width:0}
+.pitem .name{white-space:nowrap;min-width:0}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* review tab switch, insights */
+.seg{display:flex;gap:6px;background:var(--pale);border-radius:14px;padding:4px;margin-bottom:12px}
+.segbtn{flex:1;border:0;background:none;border-radius:11px;min-height:42px;font-weight:700;color:var(--muted)}
+.segbtn[aria-pressed=true]{background:var(--paper);color:var(--purple);box-shadow:var(--shadow)}
+.segbtn:focus-visible{outline:3px solid color-mix(in srgb,var(--purple) 55%,transparent);outline-offset:2px}
+.heat{display:grid;gap:3px;align-items:center}
+.hlabel{font-size:10px;color:var(--muted)}
+.hcell{display:block;aspect-ratio:1;border-radius:4px;border:1px solid var(--line);background:var(--pale)}
+.hcell.l1{background:color-mix(in srgb,var(--green) 28%,var(--paper));border-color:transparent}
+.hcell.l2{background:color-mix(in srgb,var(--green) 58%,var(--paper));border-color:transparent}
+.hcell.l3{background:var(--green);border-color:transparent}
+.hcell.lf{background:transparent;border-style:dashed;opacity:.55}
+.legend .hcell{display:inline-block;width:14px;height:14px;aspect-ratio:auto;margin:0}
+.brow{display:flex;align-items:center;gap:10px;padding:5px 0}
+.bl{width:36px;flex:none;font-size:13px;font-weight:700}
+.bar{flex:1;height:10px;border-radius:6px;background:var(--pale);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--green);border-radius:6px}
+.bv{width:44px;flex:none;text-align:right;font-size:13px;color:var(--muted)}
+.bv.wide{width:78px}
+.grow{padding:6px 0}
+.gname{font-size:14px;font-weight:650;overflow-wrap:anywhere}
+.sug{border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px;overflow-wrap:anywhere}
+.sug .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.sug p{margin:6px 0 0}
