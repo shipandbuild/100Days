@@ -2,7 +2,7 @@
 import * as M from './model.js';
 import * as DB from './db.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const $ = (sel, root = document) => root.querySelector(sel);
 
 /* ------------------------------------------------------------------ tiny DOM helper (text is always set as text, never HTML) */
@@ -31,13 +31,14 @@ const S = {
   profiles: [], profile: null, challenge: null,
   entries: {}, weeks: {}, meta: {},
   tab: 'today', viewDay: 1, viewWeek: 1,
-  todayISO: M.localISO(),
   locked: false,
   status: 'Saved on this device',
   dismissed: { backup: false },
   installEvent: null, updateWorker: null, wantReload: false,
 };
-const todayN = () => (S.challenge ? M.dayNumberFor(S.challenge.start, S.todayISO) : 0);
+// Always read the clock fresh. Never cache "today": an installed app can stay open for days.
+let lastSeenISO = M.localISO();   // the date we last drew the screen for (see checkDayRollover)
+const todayN = () => (S.challenge ? M.dayNumberFor(S.challenge.start, M.localISO()) : 0);
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 
@@ -166,7 +167,7 @@ async function selectProfile(p, { lock = false } = {}) {
   S.profile = p; S.challenge = ch;
   S.entries = Object.fromEntries(entries.map((e) => [e.day, e]));
   S.weeks = Object.fromEntries(weeks.map((w) => [w.week, w]));
-  S.todayISO = M.localISO();
+  lastSeenISO = M.localISO();
   S.viewDay = M.clamp(todayN(), 1, M.DAYS);
   S.viewWeek = M.clamp(M.weekOfDay(S.viewDay), 1, M.WEEKS);
   S.tab = 'today';
@@ -713,7 +714,7 @@ async function handleRestoreFile(file) {
 async function addReminder() {
   const ch = S.challenge, tn = todayN(), time = S.meta.reminderTime || '21:00';
   if (tn > M.DAYS) return toast('Your challenge is finished');
-  const fromISO = tn < 1 ? ch.start : S.todayISO;
+  const fromISO = tn < 1 ? ch.start : M.localISO();
   const count = tn < 1 ? M.DAYS : M.DAYS - tn + 1;
   const base = location.origin + location.pathname.replace(/[^/]*$/, '');
   const ics = M.buildICS({ title: ch.title, fromISO, time, count, url: /^https?:/.test(location.protocol) ? base : '' });
@@ -753,17 +754,35 @@ window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); S.in
 window.addEventListener('appinstalled', () => { S.installEvent = null; if (S.mode === 'app') render(); toast('Installed'); });
 
 /* ------------------------------------------------------------------ lifecycle */
+const isTyping = () => !!document.activeElement && /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName);
+
+/** If the calendar date changed while the app stayed open (past midnight, or a desktop window left open for days),
+ *  move "today" forward and redraw. Waits if the person is typing so it never disturbs them. */
+function checkDayRollover() {
+  if (S.mode !== 'app' || !S.challenge) return;
+  const iso = M.localISO();
+  if (iso === lastSeenISO || (isTyping() && !S.locked)) return;
+  const oldDay = M.clamp(M.dayNumberFor(S.challenge.start, lastSeenISO), 1, M.DAYS);
+  lastSeenISO = iso;
+  if (S.viewDay === oldDay) {                       // they were looking at "today": follow it
+    S.viewDay = M.clamp(todayN(), 1, M.DAYS);
+    S.viewWeek = M.clamp(M.weekOfDay(S.viewDay), 1, M.WEEKS);
+  }
+  render();
+}
+
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); flush(); return; }
   if (S.mode !== 'app') return;
-  const iso = M.localISO();
-  if (iso !== S.todayISO) { S.todayISO = iso; S.viewDay = M.clamp(todayN(), 1, M.DAYS); S.viewWeek = M.weekOfDay(S.viewDay); }
   if (S.profile && S.profile.pin && !S.locked && hiddenAt && Date.now() - hiddenAt > 60000) S.locked = true;
   hiddenAt = 0;
-  const typing = document.activeElement && /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName);
-  if (!typing || S.locked) render();
+  checkDayRollover();
+  if (!isTyping() || S.locked) render();
 });
+window.addEventListener('focus', checkDayRollover);
+window.addEventListener('pageshow', checkDayRollover);
+setInterval(checkDayRollover, 30000);
 window.addEventListener('pagehide', () => { flush(); });
 $('#restoreFile').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; handleRestoreFile(f); });
 
