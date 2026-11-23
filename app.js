@@ -2,7 +2,7 @@
 import * as M from './model.js';
 import * as DB from './db.js';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const $ = (sel, root = document) => root.querySelector(sel);
 
 /* ------------------------------------------------------------------ tiny DOM helper (text is always set as text, never HTML) */
@@ -30,7 +30,7 @@ const S = {
   mode: 'boot',            // boot | welcome | app | fatal
   profiles: [], profile: null, challenge: null,
   entries: {}, weeks: {}, meta: {},
-  tab: 'today', viewDay: 1, viewWeek: 1, reviewMode: 'week',   // reviewMode: 'week' | 'insights'
+  attempts: [], tab: 'today', viewDay: 1, viewWeek: 1, reviewMode: 'week',   // reviewMode: 'week' | 'insights'
   locked: false,
   status: 'Saved on this device',
   dismissed: { backup: false, rescue: null, why: null, review: null },
@@ -227,8 +227,9 @@ async function selectProfile(p, { lock = false } = {}) {
   rev++;
   await flush();
   dirty.clear(); clearTimeout(saveTimer);   // never carry unsaved keys of the previous person into the next one
-  const chs = (await DB.challengesOfProfile(p.id)).sort((a, b) => b.createdAt - a.createdAt);
-  let ch = chs[0];
+  const chs = await DB.challengesOfProfile(p.id);
+  let ch = M.currentChallenge(chs);
+  S.attempts = chs.filter((c) => c.endedAt).sort((a, b) => (a.attempt || 1) - (b.attempt || 1));
   if (!ch) {
     ch = { id: M.uid(), profileId: p.id, title: 'My 100 Days', start: M.localISO(), goals: [], createdAt: Date.now(), why: '', celebrated: [] };
     await DB.put('challenges', ch);
@@ -351,7 +352,7 @@ function heroView() {
   const range = `${M.formatISO(ch.start)} – ${M.formatISO(M.dateOfDay(ch.start, M.DAYS))}`;
   const pct = M.clamp(tn, 0, M.DAYS);
   return h('section', { class: 'hero' },
-    h('div', { class: 'eyebrow' }, 'Your journey'),
+    h('div', { class: 'eyebrow' }, ch.attempt > 1 ? `Your journey · Attempt ${ch.attempt}` : 'Your journey'),
     h('h2', null, big),
     h('p', null, range),
     h('div', { class: 'track', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': M.DAYS, 'aria-valuenow': pct, 'aria-label': 'Days elapsed' }, h('div', { class: 'fill', style: `width:${pct}%` })),
@@ -570,6 +571,14 @@ function habitCards() {
   const ch = S.challenge, tn = todayN();
   if (S.viewDay !== tn || tn < 1 || tn > M.DAYS) return null;     // only when looking at today
   const cards = [];
+  const stalled = M.stalledInfo(ch, S.entries, tn);
+  if (stalled) {
+    cards.push(h('div', { class: 'banner habit' },
+      h('p', null, h('b', null, `${stalled.run} days without a goal ticked. `), 'Want a fresh start from Day 1? Your current run is saved as an earlier attempt, so nothing is lost.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small primary', onclick: startOver }, 'Start over from Day 1'),
+        h('button', { class: 'btn small', onclick: keepGoing }, 'Keep going where I was'))));
+  }
   const r = M.rescueInfo(ch, S.entries, tn);
   if (r && S.dismissed.rescue !== r.day) {
     cards.push(h('div', { class: 'banner habit' },
@@ -578,7 +587,7 @@ function habitCards() {
         h('button', { class: 'btn small primary', onclick: () => gotoDay(r.day) }, `Open Day ${r.day}`),
         h('button', { class: 'btn small', onclick: () => { S.dismissed.rescue = r.day; render(); } }, 'Not now'))));
   }
-  if (M.hardStretch(ch, S.entries, tn) && S.dismissed.why !== tn) {
+  if (!stalled && M.hardStretch(ch, S.entries, tn) && S.dismissed.why !== tn) {
     cards.push(h('div', { class: 'banner habit' },
       ch.why
         ? h('div', { style: 'flex:1 1 200px' }, h('p', null, h('b', null, 'Two hard days in a row. That happens. '), 'Remember why you started:'), h('div', { class: 'quote' }, ch.why))
@@ -596,6 +605,41 @@ function habitCards() {
         h('button', { class: 'btn small', onclick: () => { S.dismissed.review = w; render(); } }, 'Later'))));
   }
   return cards.length ? h('div', null, cards.slice(0, 2)) : null;     // never stack more than two
+}
+
+async function keepGoing() {
+  const tn = todayN();
+  await mutateChallenge((c) => { c.resetSnooze = tn + M.RESET_AFTER; });
+  render();
+}
+/** Save the current run as an earlier attempt and begin a new Day 1 today, with the same active goals. */
+async function startOver() {
+  const tn = todayN();
+  const ok = await confirmBox({
+    title: 'Start over from Day 1?',
+    message: `Your current run (up to Day ${M.clamp(tn, 1, M.DAYS)}) is saved as an earlier attempt in Settings, so nothing is lost. A new Day 1 starts today with your current goals. If you added a calendar reminder, add a fresh one from Settings.`,
+    okText: 'Start over',
+  });
+  if (!ok) return;
+  try {
+    await flush();
+    rev++;
+    await DB.startOver(S.challenge.id, (old) => M.restartPlan(old, M.dayNumberFor(old.start, M.localISO()), Date.now()));
+    await selectProfile(S.profile);                     // loads the new attempt (or the one another window just made)
+    toast('Fresh start. Day 1 is today.');
+  } catch (e) { console.error(e); toast('Couldn\'t start over'); }
+}
+async function viewAttempt(c) {
+  const rows = await DB.entriesOfChallenge(c.id);
+  const entries = Object.fromEntries(rows.map((e) => [e.day, e]));
+  const st = M.computeStats(c, entries, c.endedDay);
+  openDialog((dlg, close) => dlg.append(
+    h('h3', null, `Attempt ${c.attempt || 1}`),
+    h('p', { class: 'tiny muted' }, `${M.formatISO(c.start)} – ${M.formatISO(M.dateOfDay(c.start, c.endedDay))}. Ended on Day ${c.endedDay}.`),
+    h('div', { class: 'stats' }, stat(st.daysComplete, 'full days'), stat(st.best, 'best streak'), stat(st.due ? st.pct + '%' : '–', 'check-ins')),
+    h('div', { style: 'margin-top:12px' }, heatBlock(c, entries, c.endedDay)),
+    h('p', { class: 'tiny muted' }, 'Diary notes from this attempt are kept on this device and in your backups.'),
+    h('div', { class: 'dlg-actions' }, h('button', { class: 'btn primary', onclick: () => close(null) }, 'Close'))));
 }
 
 async function editWhy() {
@@ -616,6 +660,7 @@ let celebrating = false, celebTimer;
 function scheduleCelebrate() { clearTimeout(celebTimer); celebTimer = setTimeout(maybeCelebrate, 600); }
 async function maybeCelebrate() {
   if (celebrating || S.mode !== 'app' || S.locked || S.tab !== 'today' || $('#dlg').open || isTyping()) return;
+  if (M.stalledInfo(S.challenge, S.entries, todayN())) return;          // no party while the "start over?" offer is showing
   const due = M.dueMilestone(S.challenge, S.entries, todayN());
   if (!due) return;
   celebrating = true;
@@ -712,6 +757,20 @@ async function stopGoal(g) {
   render(); toast('Goal stopped');
 }
 
+/** The weekday-by-week grid plus its legend. Shared by Insights and the earlier-attempt viewer. */
+function heatBlock(ch, entries, tn) {
+  const hm = M.heatmap(ch, entries, tn);
+  const grid = h('div', { class: 'heat', role: 'img', 'aria-label': 'Grid of your 100 days by weekday and week. Darker green means more goals done that day.', style: `grid-template-columns:30px repeat(${hm.cols},minmax(0,1fr))` });
+  DAY_SHORT.forEach((d, r) => { if (r % 2 === 0) grid.append(h('span', { class: 'hlabel', style: `grid-row:${r + 1};grid-column:1` }, d)); });
+  hm.cells.forEach((c) => grid.append(h('span', {
+    class: 'hcell ' + (c.level < 0 ? 'lf' : 'l' + c.level), style: `grid-row:${c.row + 1};grid-column:${c.col + 2}`,
+    title: `Day ${c.day}, ${M.formatISO(M.dateOfDay(ch.start, c.day))}${c.total ? `: ${c.done} of ${c.total} goals` : ''}`,
+  })));
+  return h('div', null, grid,
+    h('div', { class: 'legend' }, h('span', null, 'Fewer goals'),
+      ['l0', 'l1', 'l2', 'l3'].map((l) => h('span', { class: 'hcell ' + l, 'aria-hidden': 'true' })), h('span', null, 'More')));
+}
+
 function insightsView() {
   const ch = S.challenge, tn = todayN(), settled = M.settledDays(tn);
   if (!ch.goals.length || settled < 3) {
@@ -749,18 +808,9 @@ function insightsView() {
     panels.push(h('section', { class: 'panel' }, h('h3', null, 'Worth a look'), h('p', { class: 'tiny muted' }, 'Nothing to change right now. Keep going.')));
   }
 
-  const hm = M.heatmap(ch, S.entries, tn);
-  const grid = h('div', { class: 'heat', role: 'img', 'aria-label': 'Grid of your 100 days by weekday and week. Darker green means more goals done that day.', style: `grid-template-columns:30px repeat(${hm.cols},minmax(0,1fr))` });
-  DAY_SHORT.forEach((d, r) => { if (r % 2 === 0) grid.append(h('span', { class: 'hlabel', style: `grid-row:${r + 1};grid-column:1` }, d)); });
-  hm.cells.forEach((c) => grid.append(h('span', {
-    class: 'hcell ' + (c.level < 0 ? 'lf' : 'l' + c.level), style: `grid-row:${c.row + 1};grid-column:${c.col + 2}`,
-    title: `Day ${c.day}, ${M.formatISO(M.dateOfDay(ch.start, c.day))}${c.total ? `: ${c.done} of ${c.total} goals` : ''}`,
-  })));
   panels.push(h('section', { class: 'panel' }, h('h3', null, 'Your 100 days'),
     h('p', { class: 'tiny muted' }, 'Each column is a week, Monday to Sunday.'),
-    h('div', { style: 'margin-top:10px' }, grid),
-    h('div', { class: 'legend' }, h('span', null, 'Fewer goals'),
-      ['l0', 'l1', 'l2', 'l3'].map((l) => h('span', { class: 'hcell ' + l, 'aria-hidden': 'true' })), h('span', null, 'More'))));
+    h('div', { style: 'margin-top:10px' }, heatBlock(ch, S.entries, tn))));
 
   const wd = M.weekdayStats(ch, S.entries, tn);
   panels.push(h('section', { class: 'panel' }, h('h3', null, 'By weekday'),
@@ -819,10 +869,17 @@ function settingsView() {
         },
       }, 'Save')));
 
+  const onAndroid = /Android/i.test(navigator.userAgent);
+  const saveTime = async () => { S.meta.reminderTime = timeIn.value || '21:00'; await DB.setMeta('reminderTime', S.meta.reminderTime); };
+  const googleBtn = (primary) => h('button', { class: 'btn' + (primary ? ' primary' : ''), onclick: async () => { await saveTime(); addGoogleReminder(); } }, 'Add to Google Calendar');
+  const fileBtn = (primary) => h('button', { class: 'btn' + (primary ? ' primary' : ''), onclick: async () => { await saveTime(); addReminder(); } }, primary ? 'Add to calendar' : 'Download calendar file');
   const reminder = h('section', { class: 'panel' }, h('h3', null, 'Daily reminder'),
-    h('p', { class: 'tiny muted' }, 'Adds a repeating event with an alert to your phone\'s Calendar for the days you have left. It works on iPhone and Android, and nothing is sent anywhere. You can edit or delete it in your Calendar app.'),
+    h('p', { class: 'tiny muted' }, onAndroid
+      ? 'Opens Google Calendar with a daily event for the days you have left already filled in. Tap Save there. Nothing is sent anywhere, and you can edit or delete the event in Calendar.'
+      : 'Adds a repeating event with an alert to your phone\'s Calendar for the days you have left. Nothing is sent anywhere. You can edit or delete it in your Calendar app.'),
     h('div', { class: 'field' }, h('label', { for: 'timeIn' }, 'Remind me at'), timeIn),
-    h('div', { class: 'save-row' }, h('span'), h('button', { class: 'btn primary', onclick: async () => { S.meta.reminderTime = timeIn.value || '21:00'; await DB.setMeta('reminderTime', S.meta.reminderTime); addReminder(); } }, 'Add to calendar')));
+    h('div', { class: 'save-row', style: 'justify-content:flex-start;flex-wrap:wrap' }, onAndroid ? [googleBtn(true), fileBtn(false)] : [fileBtn(true), googleBtn(false)]),
+    onAndroid ? h('p', { class: 'tiny muted' }, 'Google Calendar may alert you 10 minutes early. To change that, open the event and edit Notifications. The "Download calendar file" button is for calendar apps other than Google Calendar: open the file from your Downloads.') : null);
 
   const lastB = S.meta.lastBackup ? new Date(S.meta.lastBackup).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'never';
   const backup = h('section', { class: 'panel' }, h('h3', null, 'Backup & restore'),
@@ -845,7 +902,13 @@ function settingsView() {
     h('p', { class: 'tiny' }, 'Storage: ', persistNote),
     h('p', { class: 'tiny muted' }, `Version ${APP_VERSION}`));
 
-  return h('div', null, challenge, reminder, backup, people, about);
+  const attempts = S.attempts.length ? h('section', { class: 'panel' }, h('h3', null, 'Earlier attempts'),
+    h('p', { class: 'tiny muted' }, 'Runs you started over from. They stay on this device and in your backups.'),
+    S.attempts.map((c) => h('div', { class: 'brow', style: 'justify-content:space-between;flex-wrap:wrap' },
+      h('span', null, h('b', null, `Attempt ${c.attempt || 1}`), ` · ${M.formatISO(c.start)} – ${M.formatISO(M.dateOfDay(c.start, c.endedDay))}`),
+      h('button', { class: 'btn small', onclick: () => viewAttempt(c) }, 'View')))) : null;
+
+  return h('div', null, challenge, reminder, attempts, backup, people, about);
 }
 
 /* ----- welcome / lock / fatal */
@@ -1038,16 +1101,31 @@ async function handleRestoreFile(file) {
   } catch (e) { console.error(e); toast('Couldn\'t restore that file'); }
 }
 
-async function addReminder() {
+function reminderPlan() {
   const ch = S.challenge, tn = todayN(), time = S.meta.reminderTime || '21:00';
-  if (tn > M.DAYS) return toast('Your challenge is finished');
-  const fromISO = tn < 1 ? ch.start : M.localISO();
-  const count = tn < 1 ? M.DAYS : M.DAYS - tn + 1;
+  if (tn > M.DAYS) { toast('Your challenge is finished'); return null; }
   const base = location.origin + location.pathname.replace(/[^/]*$/, '');
-  const ics = M.buildICS({ title: ch.title, fromISO, time, count, url: /^https?:/.test(location.protocol) ? base : '' });
-  const file = new File([ics], 'my-100-days-reminder.ics', { type: 'text/calendar' });
+  return {
+    title: ch.title, time,
+    fromISO: tn < 1 ? ch.start : M.localISO(),
+    count: tn < 1 ? M.DAYS : M.DAYS - tn + 1,
+    url: /^https?:/.test(location.protocol) ? base : '',
+  };
+}
+/** Calendar file (.ics): the share sheet on iPhone; a download elsewhere, which Android doesn't import by itself. */
+async function addReminder() {
+  const plan = reminderPlan(); if (!plan) return;
+  const file = new File([M.buildICS(plan)], 'my-100-days-reminder.ics', { type: 'text/calendar' });
   const res = await deliverFile(file, 'My 100 Days reminder');
-  if (res === 'downloaded') toast('Open the downloaded file to add it to your calendar');
+  if (res === 'downloaded') toast('Now open the downloaded file to add it to your calendar');
+}
+/** Opens Google Calendar's new-event screen already filled in. No file involved. */
+function addGoogleReminder() {
+  const plan = reminderPlan(); if (!plan) return;
+  let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { /* leave it out */ }
+  const link = M.googleCalendarURL({ ...plan, tz });
+  const w = window.open(link, '_blank', 'noopener');
+  if (!w) location.assign(link);                       // pop-up blocked: go there directly
 }
 
 /* ------------------------------------------------------------------ PWA: install, updates, storage protection */
@@ -1119,7 +1197,7 @@ async function syncExternal() {
   needsRefresh = false;
   const startRev = rev;
   try {
-    const before = stable([S.profiles, S.profile, S.challenge, byDay(S.entries), byWeek(S.weeks)]);
+    const before = stable([S.profiles, S.profile, S.challenge, byDay(S.entries), byWeek(S.weeks), S.attempts]);
     const activeId = await reloadFromDB();
     if (rev !== startRev) { needsRefresh = true; return setTimeout(syncExternal, 250); }
     if (!S.profiles.length) { S.mode = 'welcome'; S.profile = null; S.challenge = null; return render(); }
@@ -1127,12 +1205,13 @@ async function syncExternal() {
     const p = S.profiles.find((x) => x.id === S.profile.id);
     if (!p) return selectProfile(S.profiles[0], { lock: true });                // this person was deleted elsewhere
     const ch = await DB.get('challenges', S.challenge.id);
-    if (!ch) return selectProfile(p, { lock: S.locked });
+    if (!ch || ch.endedAt) return selectProfile(p, { lock: S.locked });          // this attempt was archived in another window
+    const attempts = (await DB.challengesOfProfile(p.id)).filter((c) => c.endedAt).sort((a, b) => (a.attempt || 1) - (b.attempt || 1));
     const [entries, weeks] = await Promise.all([DB.entriesOfChallenge(ch.id), DB.weeksOfChallenge(ch.id)]);
     // Something changed here while we were reading: our snapshot is stale, so drop it and look again shortly.
     if (dirty.size || inflight || rev !== startRev) { needsRefresh = true; return setTimeout(syncExternal, 250); }
-    if (stable([S.profiles, p, ch, entries, weeks]) === before) return;        // nothing changed elsewhere: leave the screen alone
-    S.profile = p; S.challenge = ch;
+    if (stable([S.profiles, p, ch, entries, weeks, attempts]) === before) return;        // nothing changed elsewhere: leave the screen alone
+    S.profile = p; S.challenge = ch; S.attempts = attempts;
     S.entries = Object.fromEntries(entries.map((e) => [e.day, e]));
     S.weeks = Object.fromEntries(weeks.map((w) => [w.week, w]));
     render();

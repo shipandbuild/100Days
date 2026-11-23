@@ -176,6 +176,46 @@ export function dueMilestone(ch, entries, todayN) {
   return { milestone, mark: reached, stats };
 }
 
+/* ---------- starting over after a long gap ---------- */
+
+export const RESET_AFTER = 7;   // days in a row with no goal ticked
+
+/** The last RESET_AFTER finished days all had goals and none was ticked, and nothing is ticked today either:
+ *  time to offer a fresh start. `resetSnooze` (set by "Keep going") holds the offer back until that day number. */
+export function stalledInfo(ch, entries, todayN) {
+  if (ch.endedAt || todayN <= RESET_AFTER || todayN > DAYS) return null;
+  if ((ch.resetSnooze || 0) > todayN) return null;
+  const today = dayStatus(ch, entries, todayN);
+  if (today.done > 0) return null;                       // they're back: nothing to offer
+  let run = 0;
+  for (let n = todayN - 1; n >= 1; n--) {
+    const s = dayStatus(ch, entries, n);
+    if (s.total > 0 && s.done === 0) run++; else break;
+  }
+  return run >= RESET_AFTER ? { run } : null;
+}
+
+/** Split a challenge into the finished attempt and a fresh one that starts today with the same active goals.
+ *  The new id is derived from the old one, so two windows doing this at once write the very same record. */
+export function restartPlan(ch, todayN, now = Date.now()) {
+  const attempt = ch.attempt || 1;
+  const base = String(ch.id).split('~')[0];
+  const ended = { ...ch, attempt, endedAt: now, endedDay: clamp(todayN, 1, DAYS) };
+  delete ended.resetSnooze;
+  const next = {
+    id: `${base}~a${attempt + 1}`, profileId: ch.profileId, title: ch.title, start: localISO(new Date(now)),
+    goals: activeGoals(ch, todayN).map((g) => ({ id: g.id, name: g.name, from: 1, to: null })),
+    createdAt: now, why: ch.why || '', celebrated: [], attempt: attempt + 1,
+  };
+  return { ended, next };
+}
+
+/** The challenge a person is on now: the newest one that hasn't ended. */
+export const currentChallenge = (list) => {
+  const byNew = [...list].sort((a, b) => b.createdAt - a.createdAt);
+  return byNew.find((c) => !c.endedAt) || byNew[0];
+};
+
 /* ---------- insights (all computed from data already on the device) ---------- */
 
 /** Days whose outcome is settled: everything before today (today is still in progress), or all 100 once finished. */
@@ -344,7 +384,12 @@ export function normalizeBackup(data) {
       goals.push({ id: g.id, name: str(g.name, 70), from: int(g.from, 1, DAYS + 1, 1), to: g.to == null ? null : int(g.to, 1, DAYS + 1, null) });
     }
     const celebrated = [...new Set((Array.isArray(c.celebrated) ? c.celebrated : []).filter((m) => MILESTONES.includes(m)))].sort((a, b) => a - b);
-    challenges.push({ id: c.id, profileId: c.profileId, title: str(c.title, 60).trim() || 'My 100 Days', start: c.start, goals, createdAt: num(c.createdAt, now), why: str(c.why, WHY_MAX).trim(), celebrated });
+    const out = { id: c.id, profileId: c.profileId, title: str(c.title, 60).trim() || 'My 100 Days', start: c.start, goals, createdAt: num(c.createdAt, now), why: str(c.why, WHY_MAX).trim(), celebrated };
+    // Optional fields: keep only values that make sense, never invent one.
+    if (Number.isInteger(c.attempt) && c.attempt >= 2 && c.attempt <= 999) out.attempt = c.attempt;
+    if (Number.isFinite(c.endedAt)) { out.endedAt = c.endedAt; out.endedDay = int(c.endedDay, 1, DAYS, DAYS); out.attempt = out.attempt || 1; }
+    else if (Number.isInteger(c.resetSnooze) && c.resetSnooze >= 1 && c.resetSnooze <= 999) out.resetSnooze = c.resetSnooze;
+    challenges.push(out);
   }
   const entries = [], seenE = new Set();
   for (const e of data.entries) {
@@ -374,15 +419,37 @@ export function normalizeBackup(data) {
 const icsEscape = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 
 /** A recurring daily calendar event with an alarm at the event time. Floating local time, so it follows the phone's timezone. */
-export function buildICS({ title, fromISO, time, count, url, now = new Date() }) {
+/** Local start/end stamps (YYYYMMDDTHHMMSS) for the daily check-in event. A late reminder (e.g. 23:55) ends after midnight,
+ *  so the end date rolls over to the next day. Shared by the .ics file and the Google Calendar link so they can't disagree. */
+function reminderSpan(fromISO, time) {
   const [h, m] = time.split(':').map(Number);
   const pad = (n) => String(n).padStart(2, '0');
   const endMin = h * 60 + m + 15;
   const endH = Math.floor((endMin % 1440) / 60), endM = endMin % 60;
-  const ds = fromISO.replace(/-/g, '');
-  // A late reminder (e.g. 23:55) ends after midnight, so the end date must roll over to the next day.
   const endDate = endMin >= 1440 ? new Date(utcMs(fromISO) + 864e5).toISOString().slice(0, 10) : fromISO;
-  const de = endDate.replace(/-/g, '');
+  return {
+    start: `${fromISO.replace(/-/g, '')}T${pad(h)}${pad(m)}00`,
+    end: `${endDate.replace(/-/g, '')}T${pad(endH)}${pad(endM)}00`,
+  };
+}
+
+/** A link that opens Google Calendar's "new event" screen already filled in (repeats daily for `count` days).
+ *  Needs no file, so it works where a downloaded .ics doesn't get imported (many Android phones). */
+export function googleCalendarURL({ fromISO, time, count, url, tz }) {
+  const { start, end } = reminderSpan(fromISO, time);
+  const q = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: 'My 100 Days check-in',
+    dates: `${start}/${end}`,
+    details: 'Open My 100 Days and check in' + (url ? '\n' + url : ''),
+    recur: `RRULE:FREQ=DAILY;COUNT=${Math.max(1, count)}`,
+  });
+  if (tz) q.set('ctz', tz);
+  return 'https://calendar.google.com/calendar/render?' + q.toString();
+}
+
+export function buildICS({ title, fromISO, time, count, url, now = new Date() }) {
+  const { start, end } = reminderSpan(fromISO, time);
   const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const text = `Open My 100 Days and check in: ${title}`;
   const lines = [
@@ -390,8 +457,8 @@ export function buildICS({ title, fromISO, time, count, url, now = new Date() })
     'BEGIN:VEVENT',
     `UID:${uid()}@my100days`,
     `DTSTAMP:${stamp}`,
-    `DTSTART:${ds}T${pad(h)}${pad(m)}00`,
-    `DTEND:${de}T${pad(endH)}${pad(endM)}00`,
+    `DTSTART:${start}`,
+    `DTEND:${end}`,
     `RRULE:FREQ=DAILY;COUNT=${Math.max(1, count)}`,
     `SUMMARY:${icsEscape('My 100 Days check-in')}`,
     `DESCRIPTION:${icsEscape(text + (url ? '\n' + url : ''))}`,

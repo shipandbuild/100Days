@@ -1,6 +1,6 @@
 // Offline-first service worker. App files are cached on install and served from the cache.
 // IMPORTANT: bump VERSION whenever you deploy a change to any app file, so installed copies pick it up.
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const CACHE = 'my100days-' + VERSION;
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './model.js', './db.js', './manifest.webmanifest',

@@ -76,6 +76,24 @@ export async function update(store, key, fn) {
   await done(tx);
   return out;
 }
+/** Archive an attempt and start the next one in ONE transaction. `plan(copyOfOld)` returns { ended, next }.
+ *  If the attempt has already ended (another window got there first) nothing is written and null is returned. */
+export async function startOver(oldId, plan) {
+  const db = await openDB();
+  const tx = db.transaction('challenges', 'readwrite');
+  const os = tx.objectStore('challenges');
+  let out = null;
+  const req = os.get(oldId);
+  req.onsuccess = () => {
+    const old = req.result;
+    if (!old || old.endedAt) return;
+    const { ended, next } = plan(structuredClone(old));
+    os.put(ended); os.put(next);
+    out = next;
+  };
+  await done(tx);
+  return out;
+}
 export async function putMany(store, values) {
   const db = await openDB();
   const tx = db.transaction(store, 'readwrite');

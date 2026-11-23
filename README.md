@@ -36,6 +36,10 @@ Each person on a shared device gets their own profile (tap the name at the top r
 PWAs can't schedule their own notifications without a push server (which would break the "fully private" goal).
 Instead, Settings has **Add to calendar**: it creates a repeating daily event with an alert in the phone's own Calendar app for the days remaining. Nothing is sent anywhere.
 
+  - **Android:** the main button is **Add to Google Calendar**. It opens Google Calendar's new-event screen already filled in (daily, for the days left); tap Save. A downloaded `.ics` file is not imported by Android on its own, so the file is only a fallback there (**Download calendar file**, then open it from Downloads).
+  - **iPhone:** **Add to calendar** opens the share sheet; choose Calendar (or open the saved file and tap Add).
+  - Google's link can't set the alert time, so Calendar's default applies (often 10 minutes early). Edit the event's Notifications to change it.
+
 ## Backups (important)
 
 Data lives only on the device, so a lost or wiped phone loses the diary. Settings, then **Back up now** opens the share sheet
@@ -51,6 +55,16 @@ imports the JSON exported by the original single-file tracker as a new person.
 
 ## Insights (Review tab, "Insights")
 Weekday-by-week grid, completion by weekday, completion by goal, last 7 days against the 7 before, and suggestions: a goal missed 3 days running or done on under 40% of the last 14 days offers "Make it smaller" (starts a new goal from today, old history untouched) or "Stop this goal"; a goal done 90%+ over 14 days is called solid. Insights count finished days only. Nothing leaves the device.
+
+## Starting over after a long gap (v1.2)
+If nobody ticks a single goal for **7 finished days in a row** (and nothing is ticked today either), Today offers **Start over from Day 1** or **Keep going where I was**.
+- Starting over **saves the current run as an earlier attempt** (Settings, Earlier attempts, with its stats and grid) and begins a new Day 1 today with the same active goals and the same "why". Nothing is deleted.
+- "Keep going" holds the offer back for 7 more days. Ticking any goal withdraws it immediately.
+- Days with no goals never count as idle. A finished challenge (past Day 100) is never asked.
+- Milestone celebrations wait while the offer is showing.
+- An earlier attempt keeps its diary on the device and in backups; the in-app viewer shows stats and the weekday grid, not the diary text yet.
+- A calendar reminder created for the old run keeps running; add a new one from Settings for the new run.
+- Data: an attempt is a normal challenge record with `endedAt`, `endedDay` and `attempt`; the new one is `<oldId>~a2`, so two open windows starting over together write the same record.
 
 ## Data model (for Phase 2)
 
